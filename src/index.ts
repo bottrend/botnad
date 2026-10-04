@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { parseUnits } from "viem";
+import { parseUnits, createWalletClient, decodeEventLog } from "viem";
 import { createServer } from "node:http";
 import { createPublicClient, http, formatEther as viemFormatEther, formatUnits } from "viem";
 import { monad } from "viem/chains";
@@ -24,10 +24,21 @@ let tokenDecimals = 18;
 let tradeAmount = parseUnits(String(TRADE_MOE), tokenDecimals);
 const V2_ROUTER = "0x8986C8fD44eb85294A725a7e61AF35E76bA26F91" as const;
 const publicClient = createPublicClient({ chain: monad, transport: http(RPC_URL) });
-const v2QuoteAbi = [{ type: "function", name: "getAmountOut", stateMutability: "view", inputs: [{name:"token",type:"address"},{name:"amountIn",type:"uint256"},{name:"isBuy",type:"bool"}], outputs: [{name:"amountOut",type:"uint256"}] }] as const;
+const account = PRIVATE_KEY ? privateKeyToAccount(PRIVATE_KEY) : null;
+const walletClient = account ? createWalletClient({ account, chain: monad, transport: http(RPC_URL) }) : null;
+const v2QuoteAbi = [
+  { type:"function", name:"getAmountOut", stateMutability:"view", inputs:[{name:"token",type:"address"},{name:"amountIn",type:"uint256"},{name:"isBuy",type:"bool"}], outputs:[{name:"amountOut",type:"uint256"}] },
+  { type:"function", name:"getAmountIn", stateMutability:"view", inputs:[{name:"token",type:"address"},{name:"amountOut",type:"uint256"},{name:"isBuy",type:"bool"}], outputs:[{name:"amountIn",type:"uint256"}] },
+  { type:"function", name:"exactOutBuyWithNative", stateMutability:"payable", inputs:[{name:"params",type:"tuple",components:[{name:"amountOut",type:"uint256"},{name:"token",type:"address"},{name:"to",type:"address"},{name:"deadline",type:"uint256"}]}], outputs:[{name:"amountIn",type:"uint256"}] },
+  { type:"function", name:"sellToNative", stateMutability:"nonpayable", inputs:[{name:"params",type:"tuple",components:[{name:"amountIn",type:"uint256"},{name:"amountOutMin",type:"uint256"},{name:"token",type:"address"},{name:"to",type:"address"},{name:"deadline",type:"uint256"}]}], outputs:[{name:"amountOut",type:"uint256"}] },
+  { type:"event", name:"Buy", inputs:[{name:"buyer",type:"address",indexed:true},{name:"token",type:"address",indexed:true},{name:"amountIn",type:"uint256",indexed:false},{name:"amountOut",type:"uint256",indexed:false},{name:"graduated",type:"bool",indexed:false}] },
+  { type:"event", name:"Sell", inputs:[{name:"seller",type:"address",indexed:true},{name:"token",type:"address",indexed:true},{name:"amountIn",type:"uint256",indexed:false},{name:"amountOut",type:"uint256",indexed:false},{name:"graduated",type:"bool",indexed:false}] }
+] as const;
 const erc20Abi = [
   { type:"function", name:"balanceOf", stateMutability:"view", inputs:[{name:"account",type:"address"}], outputs:[{name:"",type:"uint256"}] },
-  { type:"function", name:"decimals", stateMutability:"view", inputs:[], outputs:[{name:"",type:"uint8"}] }
+  { type:"function", name:"decimals", stateMutability:"view", inputs:[], outputs:[{name:"",type:"uint8"}] },
+  { type:"function", name:"allowance", stateMutability:"view", inputs:[{name:"owner",type:"address"},{name:"spender",type:"address"}], outputs:[{name:"",type:"uint256"}] },
+  { type:"function", name:"approve", stateMutability:"nonpayable", inputs:[{name:"spender",type:"address"},{name:"amount",type:"uint256"}], outputs:[{name:"",type:"bool"}] }
 ] as const;
 const walletAddress = PRIVATE_KEY ? privateKeyToAccount(PRIVATE_KEY).address : null;
 let monBalance: number | null = null;
@@ -111,8 +122,53 @@ async function refreshBalances() {
 }
 
 async function requiredMonForBuy(): Promise<number> {
-  const oneMoeInMon = await priceMonPerMoe();
-  return TRADE_MOE * oneMoeInMon * (1 + SLIPPAGE_PERCENT / 100);
+  const amountIn = await publicClient.readContract({ address: V2_ROUTER, abi: v2QuoteAbi, functionName: "getAmountIn", args: [TOKEN_ADDRESS, tradeAmount, true] });
+  return Number(viemFormatEther(amountIn)) * (1 + SLIPPAGE_PERCENT / 100);
+}
+
+async function executeLive(side: "BUY" | "SELL", triggerPrice: number): Promise<boolean> {
+  if (!account || !walletClient || !walletAddress) throw new Error("LIVE wallet unavailable");
+  if (pending) return false;
+  pending = true; guard = null;
+  try {
+    const deadline = BigInt(Math.floor(Date.now()/1000) + 120);
+    let hash: `0x${string}`;
+    if (side === "BUY") {
+      const quotedIn = await publicClient.readContract({ address: V2_ROUTER, abi: v2QuoteAbi, functionName:"getAmountIn", args:[TOKEN_ADDRESS, tradeAmount, true] });
+      const maxIn = quotedIn * BigInt(Math.ceil(10000 + SLIPPAGE_PERCENT*100)) / 10000n;
+      if ((monBalance ?? 0) < Number(viemFormatEther(maxIn))) { guard="BUY blocked: insufficient MON"; return false; }
+      hash = await walletClient.writeContract({ address: V2_ROUTER, abi:v2QuoteAbi, functionName:"exactOutBuyWithNative", args:[{amountOut:tradeAmount,token:TOKEN_ADDRESS,to:walletAddress,deadline}], value:maxIn });
+    } else {
+      if ((moeBalance ?? 0) < TRADE_MOE) { guard="SELL blocked: insufficient MOE"; return false; }
+      const allowance = await publicClient.readContract({ address:TOKEN_ADDRESS, abi:erc20Abi, functionName:"allowance", args:[walletAddress,V2_ROUTER] });
+      if (allowance < tradeAmount) {
+        const approveHash = await walletClient.writeContract({ address:TOKEN_ADDRESS, abi:erc20Abi, functionName:"approve", args:[V2_ROUTER,tradeAmount] });
+        const approveReceipt = await publicClient.waitForTransactionReceipt({hash:approveHash});
+        if (approveReceipt.status !== "success") throw new Error("MOE approve reverted");
+      }
+      const quotedOut = await publicClient.readContract({ address:V2_ROUTER, abi:v2QuoteAbi, functionName:"getAmountOut", args:[TOKEN_ADDRESS,tradeAmount,false] });
+      const minOut = quotedOut * BigInt(Math.floor(10000-SLIPPAGE_PERCENT*100)) / 10000n;
+      hash = await walletClient.writeContract({ address:V2_ROUTER, abi:v2QuoteAbi, functionName:"sellToNative", args:[{amountIn:tradeAmount,amountOutMin:minOut,token:TOKEN_ADDRESS,to:walletAddress,deadline}] });
+    }
+    const receipt = await publicClient.waitForTransactionReceipt({hash});
+    if (receipt.status !== "success") throw new Error("Trade reverted");
+    let amountIn=0n, amountOut=0n;
+    for (const log of receipt.logs) {
+      try {
+        const e=decodeEventLog({abi:v2QuoteAbi,data:log.data,topics:log.topics});
+        if (e.eventName===side[0]+side.slice(1).toLowerCase()) {
+          const a=e.args as any; amountIn=BigInt(a.amountIn); amountOut=BigInt(a.amountOut); break;
+        }
+      } catch {}
+    }
+    if (amountIn===0n || amountOut===0n) throw new Error("Trade receipt missing router fill event");
+    const fillPrice = side==="BUY" ? Number(viemFormatEther(amountIn))/Number(formatUnits(amountOut,tokenDecimals)) : Number(viemFormatEther(amountOut))/Number(formatUnits(amountIn,tokenDecimals));
+    if (side==="BUY") buyCount++; else sellCount++; totalTrades++;
+    anchor=fillPrice; lastTrade=`${side} ${TRADE_MOE} MOE @ ${fillPrice.toFixed(9)}`;
+    lastTradeInfo={side,triggerPrice,fillPrice,txHash:hash,time:new Date().toISOString()};
+    await refreshBalances();
+    return true;
+  } finally { pending=false; }
 }
 
 async function executeDry(side: "BUY" | "SELL", triggerPrice: number): Promise<boolean> {
@@ -133,7 +189,7 @@ async function executeDry(side: "BUY" | "SELL", triggerPrice: number): Promise<b
   }
   pending = true; guard = null;
   try {
-    if (LIVE) throw new Error("LIVE execution remains locked until NadFun V2 transaction routing is enabled");
+    if (LIVE) return executeLive(side, triggerPrice);
     if (side === "BUY") buyCount++; else sellCount++;
     totalTrades++;
     const fillPrice = triggerPrice;
