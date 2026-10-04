@@ -193,6 +193,14 @@ async function executeDry(side: "BUY" | "SELL", triggerPrice: number): Promise<b
     if (side === "BUY") buyCount++; else sellCount++;
     totalTrades++;
     const fillPrice = triggerPrice;
+    if (side === "BUY") {
+      const cost = await requiredMonForBuy();
+      simMonBalance = (simMonBalance ?? 0) - cost;
+      simMoeBalance = (simMoeBalance ?? 0) + TRADE_MOE;
+    } else {
+      simMoeBalance = (simMoeBalance ?? 0) - TRADE_MOE;
+      simMonBalance = (simMonBalance ?? 0) + TRADE_MOE * fillPrice;
+    }
     lastTrade = `${side} ${TRADE_MOE} MOE @ ~${fillPrice.toFixed(9)}`;
     lastTradeInfo = { side, triggerPrice, fillPrice, time: new Date().toISOString() };
     anchor = fillPrice;
@@ -214,13 +222,12 @@ async function main() {
       lastPrice = px; lastError = null;
       if (anchor === null) { anchor = px; initialMon = monBalance; initialMoe = moeBalance; simMonBalance = monBalance; simMoeBalance = moeBalance; started = new Date().toISOString(); console.log(`Initial anchor=${anchor}`); }
       else {
-        while (!pending && anchor !== null && px >= anchor * (1 + GRID_STEP)) {
+        if (!pending && anchor !== null && px >= anchor * (1 + GRID_STEP)) {
           const level = anchor * (1 + GRID_STEP);
-          if (!(await executeDry("SELL", level))) break;
-        }
-        while (!pending && anchor !== null && px <= anchor * (1 - GRID_STEP)) {
+          await executeDry("SELL", level);
+        } else if (!pending && anchor !== null && px <= anchor * (1 - GRID_STEP)) {
           const level = anchor * (1 - GRID_STEP);
-          if (!(await executeDry("BUY", level))) break;
+          await executeDry("BUY", level);
         }
       }
     } catch (err) {
