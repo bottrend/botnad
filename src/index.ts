@@ -3,11 +3,13 @@ import { initSDK, parseEther, formatEther } from "@nadfun/sdk";
 import { createServer } from "node:http";
 import { createPublicClient, http, formatEther as viemFormatEther } from "viem";
 import { monad } from "viem/chains";
+import { privateKeyToAccount } from "viem/accounts";
 
 const RPC_URL = process.env.RPC_URL ?? "https://rpc.monad.xyz";
 const CHAIN_ID = Number(process.env.CHAIN_ID ?? "143");
 const TOKEN_ADDRESS = process.env.TOKEN_ADDRESS as `0x${string}`;
-const PRIVATE_KEY = process.env.PRIVATE_KEY as `0x${string}` | undefined;
+const RAW_PRIVATE_KEY = process.env.PRIVATE_KEY?.trim();
+const PRIVATE_KEY = RAW_PRIVATE_KEY ? (RAW_PRIVATE_KEY.startsWith("0x") ? RAW_PRIVATE_KEY : `0x${RAW_PRIVATE_KEY}`) as `0x${string}` : undefined;
 const GRID_STEP = Number(process.env.GRID_STEP ?? "0.07");
 const TRADE_MOE = Number(process.env.TRADE_MOE ?? "190");
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? "1000");
@@ -27,6 +29,10 @@ const tradeAmount = parseEther(String(TRADE_MOE));
 const V2_ROUTER = "0x8986C8fD44eb85294A725a7e61AF35E76bA26F91" as const;
 const publicClient = createPublicClient({ chain: monad, transport: http(RPC_URL) });
 const v2QuoteAbi = [{ type: "function", name: "getAmountOut", stateMutability: "view", inputs: [{name:"token",type:"address"},{name:"amountIn",type:"uint256"},{name:"isBuy",type:"bool"}], outputs: [{name:"amountOut",type:"uint256"}] }] as const;
+const erc20Abi = [{ type:"function", name:"balanceOf", stateMutability:"view", inputs:[{name:"account",type:"address"}], outputs:[{name:"",type:"uint256"}] }] as const;
+const walletAddress = PRIVATE_KEY ? privateKeyToAccount(PRIVATE_KEY).address : null;
+let monBalance: number | null = null;
+let moeBalance: number | null = null;
 let anchor: number | null = null;
 let pending = false;
 let lastPrice: number | null = null;
@@ -42,7 +48,7 @@ createServer((req, res) => {
   const lower = anchor === null ? null : anchor * (1 - GRID_STEP);
   if (req.url === "/health") {
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, live: LIVE, price: lastPrice, anchor, lower, upper, pending, buyCount, sellCount, realizedPnlMon, lastError }));
+    res.end(JSON.stringify({ ok: true, live: LIVE, walletAddress, monBalance, moeBalance, price: lastPrice, anchor, lower, upper, pending, buyCount, sellCount, realizedPnlMon, lastError }));
     return;
   }
   const fmt = (v: number | null) => v === null ? "waiting..." : v.toFixed(9);
@@ -53,7 +59,7 @@ createServer((req, res) => {
   .buy{color:#72d98b}.sell{color:#ff8b8b}.muted{color:#aaa;font-size:13px;margin-top:18px;word-break:break-all}</style></head><body><div class="card">
   <h2>MOE Grid Bot</h2><table>
   <tr><td>Status</td><td class="status">${LIVE ? "LIVE" : "DRY RUN"}</td></tr>
-  <tr><td>Current Price</td><td>${fmt(lastPrice)} MON/MOE</td></tr>
+  <tr><td>Wallet</td><td>${walletAddress ?? "not configured"}</td></tr>\n  <tr><td>MON Balance</td><td>${monBalance === null ? "waiting..." : monBalance.toFixed(4)} MON</td></tr>\n  <tr><td>MOE Balance</td><td>${moeBalance === null ? "waiting..." : moeBalance.toFixed(4)} MOE</td></tr>\n  <tr><td>Current Price</td><td>${fmt(lastPrice)} MON/MOE</td></tr>
   <tr><td>Anchor</td><td>${fmt(anchor)} MON/MOE</td></tr>
   <tr><td class="buy">BUY ≤</td><td class="buy">${fmt(lower)} MON/MOE</td></tr>
   <tr><td class="sell">SELL ≥</td><td class="sell">${fmt(upper)} MON/MOE</td></tr>
