@@ -172,6 +172,7 @@ async function executeLive(side: "BUY" | "SELL", triggerPrice: number): Promise<
 }
 
 async function executeDry(side: "BUY" | "SELL", triggerPrice: number): Promise<boolean> {
+  if (LIVE) return executeLive(side, triggerPrice);
   if (pending) return false;
   const prev = lastTradeInfo;
   if (prev) {
@@ -189,7 +190,6 @@ async function executeDry(side: "BUY" | "SELL", triggerPrice: number): Promise<b
   }
   pending = true; guard = null;
   try {
-    if (LIVE) return executeLive(side, triggerPrice);
     if (side === "BUY") buyCount++; else sellCount++;
     totalTrades++;
     const fillPrice = triggerPrice;
