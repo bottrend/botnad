@@ -32,6 +32,8 @@ const erc20Abi = [
 const walletAddress = PRIVATE_KEY ? privateKeyToAccount(PRIVATE_KEY).address : null;
 let monBalance: number | null = null;
 let moeBalance: number | null = null;
+let simMonBalance: number | null = null;
+let simMoeBalance: number | null = null;
 let anchor: number | null = null;
 let pending = false;
 let lastPrice: number | null = null;
@@ -122,10 +124,10 @@ async function executeDry(side: "BUY" | "SELL", triggerPrice: number): Promise<b
     if (side === "BUY" && prev.side === "SELL" && triggerPrice >= prev.fillPrice * (1 - MIN_ROUNDTRIP_MARGIN)) { guard = "BUY blocked: round-trip margin"; return false; }
     if (side === "SELL" && prev.side === "BUY" && triggerPrice <= prev.fillPrice * (1 + MIN_ROUNDTRIP_MARGIN)) { guard = "SELL blocked: round-trip margin"; return false; }
   }
-  if (side === "SELL" && (moeBalance ?? 0) < TRADE_MOE) { guard = "SELL blocked: insufficient MOE"; return false; }
+  const availableMoe = LIVE ? (moeBalance ?? 0) : (simMoeBalance ?? 0);\n  const availableMon = LIVE ? (monBalance ?? 0) : (simMonBalance ?? 0);\n  if (side === "SELL" && availableMoe < TRADE_MOE) { guard = "SELL blocked: insufficient MOE"; return false; }
   if (side === "BUY") {
     const needMon = await requiredMonForBuy();
-    if ((monBalance ?? 0) < needMon) { guard = `BUY blocked: insufficient MON (need ~${needMon.toFixed(4)})`; return false; }
+    if (availableMon < needMon) { guard = `BUY blocked: insufficient MON (need ~${needMon.toFixed(4)})`; return false; }
   }
   pending = true; guard = null;
   try {
@@ -152,7 +154,7 @@ async function main() {
       await refreshBalances();
       const px = await priceMonPerMoe();
       lastPrice = px; lastError = null;
-      if (anchor === null) { anchor = px; initialMon = monBalance; initialMoe = moeBalance; started = new Date().toISOString(); console.log(`Initial anchor=${anchor}`); }
+      if (anchor === null) { anchor = px; initialMon = monBalance; initialMoe = moeBalance; simMonBalance = monBalance; simMoeBalance = moeBalance; started = new Date().toISOString(); console.log(`Initial anchor=${anchor}`); }
       else {
         while (!pending && anchor !== null && px >= anchor * (1 + GRID_STEP)) {
           const level = anchor * (1 + GRID_STEP);
