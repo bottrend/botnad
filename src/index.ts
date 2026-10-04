@@ -14,9 +14,10 @@ const LIVE = (process.env.LIVE_TRADING_ENABLED ?? "false").toLowerCase() === "tr
 if (!TOKEN_ADDRESS) throw new Error("TOKEN_ADDRESS is required");
 if (LIVE && !PRIVATE_KEY) throw new Error("PRIVATE_KEY is required when LIVE_TRADING_ENABLED=true");
 
+const READ_ONLY_KEY = ("0x" + "11".repeat(32)) as `0x${string}`;
 const sdk = initSDK({
   rpcUrl: RPC_URL,
-  ...(PRIVATE_KEY ? { privateKey: PRIVATE_KEY } : {}),
+  privateKey: PRIVATE_KEY ?? READ_ONLY_KEY,
   network: "mainnet"
 });
 const tradeAmount = parseEther(String(TRADE_MOE));
