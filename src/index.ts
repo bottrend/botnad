@@ -1,6 +1,8 @@
 import "dotenv/config";
 import { initSDK, parseEther, formatEther } from "@nadfun/sdk";
 import { createServer } from "node:http";
+import { createPublicClient, http, formatEther as viemFormatEther } from "viem";
+import { monad } from "viem/chains";
 
 const RPC_URL = process.env.RPC_URL ?? "https://rpc.monad.xyz";
 const CHAIN_ID = Number(process.env.CHAIN_ID ?? "143");
@@ -22,6 +24,9 @@ const sdk = initSDK({
   network: "mainnet"
 });
 const tradeAmount = parseEther(String(TRADE_MOE));
+const V2_ROUTER = "0x8986C8fD44eb85294A725a7e61AF35E76bA26F91" as const;
+const publicClient = createPublicClient({ chain: monad, transport: http(RPC_URL) });
+const v2QuoteAbi = [{ type: "function", name: "getAmountOut", stateMutability: "view", inputs: [{name:"token",type:"address"},{name:"amountIn",type:"uint256"},{name:"isBuy",type:"bool"}], outputs: [{name:"amountOut",type:"uint256"}] }] as const;
 let anchor: number | null = null;
 let pending = false;
 let lastPrice: number | null = null;
@@ -51,9 +56,14 @@ async function rpc(method: string, params: unknown[] = []) {
 }
 
 async function priceMonPerMoe(): Promise<number> {
-  const q = await sdk.getAmountOut(TOKEN_ADDRESS, tradeAmount, false);
-  const monOut = Number(formatEther(q.amount));
-  if (!(monOut > 0)) throw new Error("Invalid sell quote");
+  const amountOut = await publicClient.readContract({
+    address: V2_ROUTER,
+    abi: v2QuoteAbi,
+    functionName: "getAmountOut",
+    args: [TOKEN_ADDRESS, tradeAmount, false]
+  });
+  const monOut = Number(viemFormatEther(amountOut));
+  if (!(monOut > 0)) throw new Error("Invalid V2 sell quote");
   return monOut / TRADE_MOE;
 }
 
@@ -67,6 +77,7 @@ async function execute(side: "BUY" | "SELL", triggerPrice: number) {
       return;
     }
     if (!PRIVATE_KEY) throw new Error("PRIVATE_KEY missing");
+    throw new Error("LIVE execution is locked until NadFun V2 transaction routing is enabled");
 
     if (side === "SELL") {
       const balance = await sdk.getBalance(TOKEN_ADDRESS);
