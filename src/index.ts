@@ -56,7 +56,10 @@ createServer((req, res) => {
   const lower = anchor === null ? null : anchor * (1 - GRID_STEP);
   if (req.url === "/health") {
     res.writeHead(200, { "content-type": "application/json" });
-    const totalMon = lastPrice !== null && monBalance !== null && moeBalance !== null ? monBalance + moeBalance * lastPrice : null;\n    const initialTotalMon = lastPrice !== null && initialMon !== null && initialMoe !== null ? initialMon + initialMoe * lastPrice : null;\n    const pnlMon = totalMon !== null && initialTotalMon !== null ? totalMon - initialTotalMon : null;\n    res.end(JSON.stringify({ ok: true, live: LIVE, walletAddress, monBalance, moeBalance, price: lastPrice, anchor, lower, upper, pending, buyCount, sellCount, totalTrades, totalMon, pnlMon, guard, started, lastTradeInfo, lastError }));
+    const totalMon = lastPrice !== null && monBalance !== null && moeBalance !== null ? monBalance + moeBalance * lastPrice : null;
+    const initialTotalMon = lastPrice !== null && initialMon !== null && initialMoe !== null ? initialMon + initialMoe * lastPrice : null;
+    const pnlMon = totalMon !== null && initialTotalMon !== null ? totalMon - initialTotalMon : null;
+    res.end(JSON.stringify({ ok: true, live: LIVE, walletAddress, monBalance, moeBalance, price: lastPrice, anchor, lower, upper, pending, buyCount, sellCount, totalTrades, totalMon, pnlMon, guard, started, lastTradeInfo, lastError }));
     return;
   }
   const fmt = (v: number | null) => v === null ? "waiting..." : v.toFixed(9);
