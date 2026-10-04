@@ -1,7 +1,7 @@
 import "dotenv/config";
-import { initSDK, parseEther, formatEther } from "@nadfun/sdk";
+import { parseUnits } from "viem";
 import { createServer } from "node:http";
-import { createPublicClient, http, formatEther as viemFormatEther } from "viem";
+import { createPublicClient, http, formatEther as viemFormatEther, formatUnits } from "viem";
 import { monad } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 
@@ -20,17 +20,15 @@ const LIVE = (process.env.LIVE_TRADING_ENABLED ?? "false").toLowerCase() === "tr
 if (!TOKEN_ADDRESS) throw new Error("TOKEN_ADDRESS is required");
 if (LIVE && !PRIVATE_KEY) throw new Error("PRIVATE_KEY is required when LIVE_TRADING_ENABLED=true");
 
-const READ_ONLY_KEY = ("0x" + "11".repeat(32)) as `0x${string}`;
-const sdk = initSDK({
-  rpcUrl: RPC_URL,
-  privateKey: PRIVATE_KEY ?? READ_ONLY_KEY,
-  network: "mainnet"
-});
-const tradeAmount = parseEther(String(TRADE_MOE));
+let tokenDecimals = 18;
+let tradeAmount = parseUnits(String(TRADE_MOE), tokenDecimals);
 const V2_ROUTER = "0x8986C8fD44eb85294A725a7e61AF35E76bA26F91" as const;
 const publicClient = createPublicClient({ chain: monad, transport: http(RPC_URL) });
 const v2QuoteAbi = [{ type: "function", name: "getAmountOut", stateMutability: "view", inputs: [{name:"token",type:"address"},{name:"amountIn",type:"uint256"},{name:"isBuy",type:"bool"}], outputs: [{name:"amountOut",type:"uint256"}] }] as const;
-const erc20Abi = [{ type:"function", name:"balanceOf", stateMutability:"view", inputs:[{name:"account",type:"address"}], outputs:[{name:"",type:"uint256"}] }] as const;
+const erc20Abi = [
+  { type:"function", name:"balanceOf", stateMutability:"view", inputs:[{name:"account",type:"address"}], outputs:[{name:"",type:"uint256"}] },
+  { type:"function", name:"decimals", stateMutability:"view", inputs:[], outputs:[{name:"",type:"uint8"}] }
+] as const;
 const walletAddress = PRIVATE_KEY ? privateKeyToAccount(PRIVATE_KEY).address : null;
 let monBalance: number | null = null;
 let moeBalance: number | null = null;
@@ -41,7 +39,6 @@ let lastError: string | null = null;
 let buyCount = 0;
 let sellCount = 0;
 let lastTrade = "None";
-let realizedPnlMon = 0;
 let initialMon: number | null = null;
 let initialMoe: number | null = null;
 let totalTrades = 0;
@@ -108,7 +105,12 @@ async function refreshBalances() {
     publicClient.readContract({ address: TOKEN_ADDRESS, abi: erc20Abi, functionName: "balanceOf", args: [walletAddress] })
   ]);
   monBalance = Number(viemFormatEther(native));
-  moeBalance = Number(viemFormatEther(token));
+  moeBalance = Number(formatUnits(token, tokenDecimals));
+}
+
+async function requiredMonForBuy(): Promise<number> {
+  const oneMoeInMon = await priceMonPerMoe();
+  return TRADE_MOE * oneMoeInMon * (1 + SLIPPAGE_PERCENT / 100);
 }
 
 async function executeDry(side: "BUY" | "SELL", triggerPrice: number): Promise<boolean> {
@@ -121,6 +123,10 @@ async function executeDry(side: "BUY" | "SELL", triggerPrice: number): Promise<b
     if (side === "SELL" && prev.side === "BUY" && triggerPrice <= prev.fillPrice * (1 + MIN_ROUNDTRIP_MARGIN)) { guard = "SELL blocked: round-trip margin"; return false; }
   }
   if (side === "SELL" && (moeBalance ?? 0) < TRADE_MOE) { guard = "SELL blocked: insufficient MOE"; return false; }
+  if (side === "BUY") {
+    const needMon = await requiredMonForBuy();
+    if ((monBalance ?? 0) < needMon) { guard = `BUY blocked: insufficient MON (need ~${needMon.toFixed(4)})`; return false; }
+  }
   pending = true; guard = null;
   try {
     if (LIVE) throw new Error("LIVE execution remains locked until NadFun V2 transaction routing is enabled");
@@ -136,6 +142,8 @@ async function executeDry(side: "BUY" | "SELL", triggerPrice: number): Promise<b
 }
 
 async function main() {
+  tokenDecimals = Number(await publicClient.readContract({ address: TOKEN_ADDRESS, abi: erc20Abi, functionName: "decimals" }));
+  tradeAmount = parseUnits(String(TRADE_MOE), tokenDecimals);
   const actualChainId = Number.parseInt(String(await rpc("eth_chainId")), 16);
   if (actualChainId !== CHAIN_ID || actualChainId !== 143) throw new Error(`Wrong chain: expected 143, got ${actualChainId}`);
   console.log("MOE grid bot started", { token: TOKEN_ADDRESS, grid: GRID_STEP, tradeMoe: TRADE_MOE, pollMs: POLL_INTERVAL_MS, live: LIVE, wallet: walletAddress });
@@ -146,9 +154,14 @@ async function main() {
       lastPrice = px; lastError = null;
       if (anchor === null) { anchor = px; initialMon = monBalance; initialMoe = moeBalance; started = new Date().toISOString(); console.log(`Initial anchor=${anchor}`); }
       else {
-        const upper = anchor * (1 + GRID_STEP), lower = anchor * (1 - GRID_STEP);
-        if (!pending && px >= upper) await executeDry("SELL", px);
-        else if (!pending && px <= lower) await executeDry("BUY", px);
+        while (!pending && anchor !== null && px >= anchor * (1 + GRID_STEP)) {
+          const level = anchor * (1 + GRID_STEP);
+          if (!(await executeDry("SELL", level))) break;
+        }
+        while (!pending && anchor !== null && px <= anchor * (1 - GRID_STEP)) {
+          const level = anchor * (1 - GRID_STEP);
+          if (!(await executeDry("BUY", level))) break;
+        }
       }
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
