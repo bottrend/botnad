@@ -31,105 +31,40 @@ let anchor: number | null = null;
 let pending = false;
 let lastPrice: number | null = null;
 let lastError: string | null = null;
+let buyCount = 0;
+let sellCount = 0;
+let lastTrade = "None";
+let realizedPnlMon = 0;
 const PORT = Number(process.env.PORT ?? "8080");
 
 createServer((req, res) => {
+  const upper = anchor === null ? null : anchor * (1 + GRID_STEP);
+  const lower = anchor === null ? null : anchor * (1 - GRID_STEP);
   if (req.url === "/health") {
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, live: LIVE, price: lastPrice, anchor, pending }));
+    res.end(JSON.stringify({ ok: true, live: LIVE, price: lastPrice, anchor, lower, upper, pending, buyCount, sellCount, realizedPnlMon, lastError }));
     return;
   }
+  const fmt = (v: number | null) => v === null ? "waiting..." : v.toFixed(9);
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-  res.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>MOE Grid Bot</title><style>body{font-family:system-ui;background:#111;color:#eee;padding:24px}.card{max-width:680px;margin:auto;background:#1d1d1d;padding:24px;border-radius:16px}b{color:#8ee3a1}code{word-break:break-all}</style></head><body><div class="card"><h2>MOE Grid Bot</h2><p>Status: <b>${LIVE ? "LIVE" : "DRY RUN"}</b></p><p>Price: ${lastPrice ?? "waiting..."} MON/MOE</p><p>Anchor: ${anchor ?? "waiting..."}</p><p>Grid: ${GRID_STEP * 100}%</p><p>Order: ${TRADE_MOE} MOE</p><p>Pending: ${pending}</p><p>Token: <code>${TOKEN_ADDRESS}</code></p><p>Last error: ${lastError ?? "none"}</p><script>setTimeout(()=>location.reload(),3000)</script></div></body></html>`);
+  res.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>MOE Grid Bot</title><style>
+  body{font-family:system-ui;background:#101010;color:#eee;margin:0;padding:18px}.card{max-width:760px;margin:auto;background:#1d1d1d;padding:22px;border-radius:16px}
+  h2{margin-top:0}.status{font-weight:700;color:#8ee3a1}table{width:100%;border-collapse:collapse;margin-top:14px}td{padding:10px 6px;border-bottom:1px solid #333}td:last-child{text-align:right;font-weight:600;word-break:break-word}
+  .buy{color:#72d98b}.sell{color:#ff8b8b}.muted{color:#aaa;font-size:13px;margin-top:18px;word-break:break-all}</style></head><body><div class="card">
+  <h2>MOE Grid Bot</h2><table>
+  <tr><td>Status</td><td class="status">${LIVE ? "LIVE" : "DRY RUN"}</td></tr>
+  <tr><td>Current Price</td><td>${fmt(lastPrice)} MON/MOE</td></tr>
+  <tr><td>Anchor</td><td>${fmt(anchor)} MON/MOE</td></tr>
+  <tr><td class="buy">BUY ≤</td><td class="buy">${fmt(lower)} MON/MOE</td></tr>
+  <tr><td class="sell">SELL ≥</td><td class="sell">${fmt(upper)} MON/MOE</td></tr>
+  <tr><td>Grid Step</td><td>${(GRID_STEP*100).toFixed(2)}%</td></tr>
+  <tr><td>Order Size</td><td>${TRADE_MOE} MOE</td></tr>
+  <tr><td>BUY Count</td><td>${buyCount}</td></tr>
+  <tr><td>SELL Count</td><td>${sellCount}</td></tr>
+  <tr><td>Realized PnL</td><td>${realizedPnlMon.toFixed(6)} MON</td></tr>
+  <tr><td>Last Trade</td><td>${lastTrade}</td></tr>
+  <tr><td>Pending</td><td>${pending ? "YES" : "NO"}</td></tr>
+  </table><div class="muted">Token: ${TOKEN_ADDRESS}<br>Last error: ${lastError ?? "none"}</div>
+  <script>setTimeout(()=>location.reload(),3000)</script></div></body></html>`);
 }).listen(PORT, "0.0.0.0", () => console.log(`Dashboard listening on :${PORT}`));
 
-async function rpc(method: string, params: unknown[] = []) {
-  const res = await fetch(RPC_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params })
-  });
-  if (!res.ok) throw new Error(`RPC HTTP ${res.status}`);
-  const data = await res.json() as { result?: unknown; error?: unknown };
-  if (data.error) throw new Error(`RPC error: ${JSON.stringify(data.error)}`);
-  return data.result;
-}
-
-async function priceMonPerMoe(): Promise<number> {
-  const amountOut = await publicClient.readContract({
-    address: V2_ROUTER,
-    abi: v2QuoteAbi,
-    functionName: "getAmountOut",
-    args: [TOKEN_ADDRESS, tradeAmount, false]
-  });
-  const monOut = Number(viemFormatEther(amountOut));
-  if (!(monOut > 0)) throw new Error("Invalid V2 sell quote");
-  return monOut / TRADE_MOE;
-}
-
-async function execute(side: "BUY" | "SELL", triggerPrice: number) {
-  if (pending) return;
-  pending = true;
-  try {
-    if (!LIVE) {
-      console.log(`DRY RUN ${side} ${TRADE_MOE} MOE @ ~${triggerPrice} MON/MOE`);
-      anchor = triggerPrice;
-      return;
-    }
-    if (!PRIVATE_KEY) throw new Error("PRIVATE_KEY missing");
-    throw new Error("LIVE execution is locked until NadFun V2 transaction routing is enabled");
-
-    if (side === "SELL") {
-      const balance = await sdk.getBalance(TOKEN_ADDRESS);
-      if (balance < tradeAmount) throw new Error("Insufficient MOE balance");
-      await sdk.simpleSell({ token: TOKEN_ADDRESS, amountIn: tradeAmount, slippagePercent: SLIPPAGE_PERCENT });
-    } else {
-      const required = await sdk.getAmountIn(TOKEN_ADDRESS, tradeAmount, true);
-      await sdk.simpleBuy({ token: TOKEN_ADDRESS, amountIn: required.amount, slippagePercent: SLIPPAGE_PERCENT });
-    }
-
-    anchor = await priceMonPerMoe();
-    console.log(`FILLED ${side}; new anchor=${anchor}`);
-  } finally {
-    pending = false;
-  }
-}
-
-async function main() {
-  const actualChainId = Number.parseInt(String(await rpc("eth_chainId")), 16);
-  if (actualChainId !== CHAIN_ID || actualChainId !== 143) {
-    throw new Error(`Wrong chain: expected 143, got ${actualChainId}`);
-  }
-
-  console.log("MOE grid bot started", {
-    token: TOKEN_ADDRESS, grid: GRID_STEP, tradeMoe: TRADE_MOE,
-    pollMs: POLL_INTERVAL_MS, live: LIVE, signerConfigured: Boolean(PRIVATE_KEY)
-  });
-
-  for (;;) {
-    try {
-      const px = await priceMonPerMoe();
-      lastPrice = px;
-      lastError = null;
-      if (anchor === null) {
-        anchor = px;
-        console.log(`Initial anchor=${anchor}`);
-      } else {
-        const upper = anchor * (1 + GRID_STEP);
-        const lower = anchor * (1 - GRID_STEP);
-        console.log(`price=${px.toFixed(9)} anchor=${anchor.toFixed(9)} buy<=${lower.toFixed(9)} sell>=${upper.toFixed(9)}`);
-        if (!pending && px >= upper) await execute("SELL", px);
-        else if (!pending && px <= lower) await execute("BUY", px);
-      }
-    } catch (err) {
-      lastError = err instanceof Error ? err.message : String(err);
-      console.error("loop error", err);
-    }
-    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
-  }
-}
-
-main().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
