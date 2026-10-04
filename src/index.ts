@@ -13,6 +13,7 @@ const RAW_PRIVATE_KEY = process.env.PRIVATE_KEY?.trim();
 const PRIVATE_KEY = RAW_PRIVATE_KEY ? (RAW_PRIVATE_KEY.startsWith("0x") ? RAW_PRIVATE_KEY : `0x${RAW_PRIVATE_KEY}`) as `0x${string}` : undefined;
 const GRID_STEP = Number(process.env.GRID_STEP ?? "0.07");
 const TRADE_MOE = Number(process.env.TRADE_MOE ?? "190");
+const GRID_PARTS = Number(process.env.GRID_PARTS ?? "30");
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? "1000");
 const SLIPPAGE_PERCENT = Number(process.env.SLIPPAGE_PERCENT ?? "1");
 const MIN_ROUNDTRIP_MARGIN = Number(process.env.MIN_ROUNDTRIP_MARGIN ?? "0.0025");
@@ -106,7 +107,7 @@ createServer((req, res) => {
   <tr><td class="buy">BUY ≤</td><td class="buy">${fmt(lower)} MON/MOE</td></tr>
   <tr><td class="sell">SELL ≥</td><td class="sell">${fmt(upper)} MON/MOE</td></tr>
   <tr><td>Grid Step</td><td>${(GRID_STEP*100).toFixed(2)}%</td></tr>
-  <tr><td>Order Size</td><td>${TRADE_MOE} MOE</td></tr>
+  <tr><td>Order Size</td><td>MOE balance / ${GRID_PARTS}</td></tr>
   <tr><td>Total Value</td><td>${lastPrice !== null && monBalance !== null && moeBalance !== null ? (monBalance + moeBalance * lastPrice).toFixed(4) : "waiting..."} MON</td></tr>\n  <tr><td>BUY Count</td><td>${buyCount}</td></tr>
   <tr><td>SELL Count</td><td>${sellCount}</td></tr>\n  <tr><td>Total Orders</td><td>${totalTrades}</td></tr>
   <tr><td>PnL vs Start</td><td>${lastPrice !== null && monBalance !== null && moeBalance !== null && initialMon !== null && initialMoe !== null ? ((monBalance + moeBalance*lastPrice) - (initialMon + initialMoe*lastPrice)).toFixed(6) : "waiting..."} MON</td></tr>
@@ -126,10 +127,12 @@ async function rpc(method: string, params: unknown[] = []) {
 }
 
 async function priceMonPerMoe(): Promise<number> {
-  const amountOut = await publicClient.readContract({ address: V2_ROUTER, abi: v2QuoteAbi, functionName: "getAmountOut", args: [TOKEN_ADDRESS, tradeAmount, false] });
+  const quoteMoe = TRADE_MOE;
+  const quoteAmount = parseUnits(String(quoteMoe), tokenDecimals);
+  const amountOut = await publicClient.readContract({ address: V2_ROUTER, abi: v2QuoteAbi, functionName: "getAmountOut", args: [TOKEN_ADDRESS, quoteAmount, false] });
   const monOut = Number(viemFormatEther(amountOut));
   if (!(monOut > 0)) throw new Error("Invalid V2 sell quote");
-  return monOut / TRADE_MOE;
+  return monOut / quoteMoe;
 }
 
 async function refreshBalances() {
@@ -142,12 +145,12 @@ async function refreshBalances() {
   moeBalance = Number(formatUnits(token, tokenDecimals));
 }
 
-async function requiredMonForBuy(): Promise<number> {
-  const amountIn = await publicClient.readContract({ address: V2_ROUTER, abi: v2QuoteAbi, functionName: "getAmountIn", args: [TOKEN_ADDRESS, tradeAmount, true] });
+async function requiredMonForBuy(amount: bigint): Promise<number> {
+  const amountIn = await publicClient.readContract({ address: V2_ROUTER, abi: v2QuoteAbi, functionName: "getAmountIn", args: [TOKEN_ADDRESS, amount, true] });
   return Number(viemFormatEther(amountIn)) * (1 + SLIPPAGE_PERCENT / 100);
 }
 
-async function executeLive(side: "BUY" | "SELL", triggerPrice: number): Promise<boolean> {
+async function executeLive(side: "BUY" | "SELL", triggerPrice: number, orderMoe: number, orderAmount: bigint): Promise<boolean> {
   if (!account || !walletClient || !walletAddress) throw new Error("LIVE wallet unavailable");
   if (pending) return false;
   pending = true; guard = null;
@@ -155,21 +158,21 @@ async function executeLive(side: "BUY" | "SELL", triggerPrice: number): Promise<
     const deadline = BigInt(Math.floor(Date.now()/1000) + 120);
     let hash: `0x${string}`;
     if (side === "BUY") {
-      const quotedIn = await publicClient.readContract({ address: V2_ROUTER, abi: v2QuoteAbi, functionName:"getAmountIn", args:[TOKEN_ADDRESS, tradeAmount, true] });
+      const quotedIn = await publicClient.readContract({ address: V2_ROUTER, abi: v2QuoteAbi, functionName:"getAmountIn", args:[TOKEN_ADDRESS, orderAmount, true] });
       const maxIn = quotedIn * BigInt(Math.ceil(10000 + SLIPPAGE_PERCENT*100)) / 10000n;
       if ((monBalance ?? 0) < Number(viemFormatEther(maxIn))) { guard="BUY blocked: insufficient MON"; return false; }
-      hash = await walletClient.writeContract({ address: V2_ROUTER, abi:v2QuoteAbi, functionName:"exactOutBuyWithNative", args:[{amountOut:tradeAmount,token:TOKEN_ADDRESS,to:walletAddress,deadline}], value:maxIn });
+      hash = await walletClient.writeContract({ address: V2_ROUTER, abi:v2QuoteAbi, functionName:"exactOutBuyWithNative", args:[{amountOut:orderAmount,token:TOKEN_ADDRESS,to:walletAddress,deadline}], value:maxIn });
     } else {
-      if ((moeBalance ?? 0) < TRADE_MOE) { guard="SELL blocked: insufficient MOE"; return false; }
+      if ((moeBalance ?? 0) < orderMoe) { guard="SELL blocked: insufficient MOE"; return false; }
       const allowance = await publicClient.readContract({ address:TOKEN_ADDRESS, abi:erc20Abi, functionName:"allowance", args:[walletAddress,V2_ROUTER] });
-      if (allowance < tradeAmount) {
-        const approveHash = await walletClient.writeContract({ address:TOKEN_ADDRESS, abi:erc20Abi, functionName:"approve", args:[V2_ROUTER,tradeAmount] });
+      if (allowance < orderAmount) {
+        const approveHash = await walletClient.writeContract({ address:TOKEN_ADDRESS, abi:erc20Abi, functionName:"approve", args:[V2_ROUTER,orderAmount] });
         const approveReceipt = await publicClient.waitForTransactionReceipt({hash:approveHash});
         if (approveReceipt.status !== "success") throw new Error("MOE approve reverted");
       }
-      const quotedOut = await publicClient.readContract({ address:V2_ROUTER, abi:v2QuoteAbi, functionName:"getAmountOut", args:[TOKEN_ADDRESS,tradeAmount,false] });
+      const quotedOut = await publicClient.readContract({ address:V2_ROUTER, abi:v2QuoteAbi, functionName:"getAmountOut", args:[TOKEN_ADDRESS,orderAmount,false] });
       const minOut = quotedOut * BigInt(Math.floor(10000-SLIPPAGE_PERCENT*100)) / 10000n;
-      hash = await walletClient.writeContract({ address:V2_ROUTER, abi:v2QuoteAbi, functionName:"sellToNative", args:[{amountIn:tradeAmount,amountOutMin:minOut,token:TOKEN_ADDRESS,to:walletAddress,deadline}] });
+      hash = await walletClient.writeContract({ address:V2_ROUTER, abi:v2QuoteAbi, functionName:"sellToNative", args:[{amountIn:orderAmount,amountOutMin:minOut,token:TOKEN_ADDRESS,to:walletAddress,deadline}] });
     }
     pendingTxHash = hash;
     await saveState();
@@ -187,7 +190,7 @@ async function executeLive(side: "BUY" | "SELL", triggerPrice: number): Promise<
     if (amountIn===0n || amountOut===0n) throw new Error("Trade receipt missing router fill event");
     const fillPrice = side==="BUY" ? Number(viemFormatEther(amountIn))/Number(formatUnits(amountOut,tokenDecimals)) : Number(viemFormatEther(amountOut))/Number(formatUnits(amountIn,tokenDecimals));
     if (side==="BUY") buyCount++; else sellCount++; totalTrades++;
-    anchor=fillPrice; lastTrade=`${side} ${TRADE_MOE} MOE @ ${fillPrice.toFixed(9)}`;
+    anchor=fillPrice; lastTrade=`${side} ${orderMoe.toFixed(6)} MOE @ ${fillPrice.toFixed(9)}`;
     lastTradeInfo={side,triggerPrice,fillPrice,txHash:hash,time:new Date().toISOString()};
     await refreshBalances();
     pendingTxHash = null;
@@ -198,6 +201,10 @@ async function executeLive(side: "BUY" | "SELL", triggerPrice: number): Promise<
 
 async function executeDry(side: "BUY" | "SELL", triggerPrice: number): Promise<boolean> {
   if (pending) return false;
+  const baseMoe = LIVE ? (moeBalance ?? 0) : (simMoeBalance ?? moeBalance ?? 0);
+  const orderMoe = Math.floor((baseMoe / GRID_PARTS) * 1e6) / 1e6;
+  if (!(orderMoe > 0)) { guard = "Order blocked: invalid dynamic size"; return false; }
+  const orderAmount = parseUnits(orderMoe.toFixed(tokenDecimals), tokenDecimals);
   const prev = lastTradeInfo;
   if (prev) {
     if (side === "BUY" && prev.side === "BUY" && triggerPrice >= prev.fillPrice) { guard = "BUY blocked: not below previous BUY"; return false; }
@@ -205,12 +212,12 @@ async function executeDry(side: "BUY" | "SELL", triggerPrice: number): Promise<b
     if (side === "BUY" && prev.side === "SELL" && triggerPrice >= prev.fillPrice * (1 - MIN_ROUNDTRIP_MARGIN)) { guard = "BUY blocked: round-trip margin"; return false; }
     if (side === "SELL" && prev.side === "BUY" && triggerPrice <= prev.fillPrice * (1 + MIN_ROUNDTRIP_MARGIN)) { guard = "SELL blocked: round-trip margin"; return false; }
   }
-  if (LIVE) return executeLive(side, triggerPrice);
+  if (LIVE) return executeLive(side, triggerPrice, orderMoe, orderAmount);
   const availableMoe = LIVE ? (moeBalance ?? 0) : (simMoeBalance ?? 0);
   const availableMon = LIVE ? (monBalance ?? 0) : (simMonBalance ?? 0);
-  if (side === "SELL" && availableMoe < TRADE_MOE) { guard = "SELL blocked: insufficient MOE"; return false; }
+  if (side === "SELL" && availableMoe < orderMoe) { guard = "SELL blocked: insufficient MOE"; return false; }
   if (side === "BUY") {
-    const needMon = await requiredMonForBuy();
+    const needMon = await requiredMonForBuy(orderAmount);
     if (availableMon < needMon) { guard = `BUY blocked: insufficient MON (need ~${needMon.toFixed(4)})`; return false; }
   }
   pending = true; guard = null;
@@ -219,14 +226,14 @@ async function executeDry(side: "BUY" | "SELL", triggerPrice: number): Promise<b
     totalTrades++;
     const fillPrice = triggerPrice;
     if (side === "BUY") {
-      const cost = await requiredMonForBuy();
+      const cost = await requiredMonForBuy(orderAmount);
       simMonBalance = (simMonBalance ?? 0) - cost;
-      simMoeBalance = (simMoeBalance ?? 0) + TRADE_MOE;
+      simMoeBalance = (simMoeBalance ?? 0) + orderMoe;
     } else {
-      simMoeBalance = (simMoeBalance ?? 0) - TRADE_MOE;
-      simMonBalance = (simMonBalance ?? 0) + TRADE_MOE * fillPrice;
+      simMoeBalance = (simMoeBalance ?? 0) - orderMoe;
+      simMonBalance = (simMonBalance ?? 0) + orderMoe * fillPrice;
     }
-    lastTrade = `${side} ${TRADE_MOE} MOE @ ~${fillPrice.toFixed(9)}`;
+    lastTrade = `${side} ${orderMoe.toFixed(6)} MOE @ ~${fillPrice.toFixed(9)}`;
     lastTradeInfo = { side, triggerPrice, fillPrice, time: new Date().toISOString() };
     anchor = fillPrice;
     console.log(`DRY RUN ${lastTrade}`);
