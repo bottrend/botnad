@@ -124,7 +124,9 @@ async function executeDry(side: "BUY" | "SELL", triggerPrice: number): Promise<b
     if (side === "BUY" && prev.side === "SELL" && triggerPrice >= prev.fillPrice * (1 - MIN_ROUNDTRIP_MARGIN)) { guard = "BUY blocked: round-trip margin"; return false; }
     if (side === "SELL" && prev.side === "BUY" && triggerPrice <= prev.fillPrice * (1 + MIN_ROUNDTRIP_MARGIN)) { guard = "SELL blocked: round-trip margin"; return false; }
   }
-  const availableMoe = LIVE ? (moeBalance ?? 0) : (simMoeBalance ?? 0);\n  const availableMon = LIVE ? (monBalance ?? 0) : (simMonBalance ?? 0);\n  if (side === "SELL" && availableMoe < TRADE_MOE) { guard = "SELL blocked: insufficient MOE"; return false; }
+  const availableMoe = LIVE ? (moeBalance ?? 0) : (simMoeBalance ?? 0);
+  const availableMon = LIVE ? (monBalance ?? 0) : (simMonBalance ?? 0);
+  if (side === "SELL" && availableMoe < TRADE_MOE) { guard = "SELL blocked: insufficient MOE"; return false; }
   if (side === "BUY") {
     const needMon = await requiredMonForBuy();
     if (availableMon < needMon) { guard = `BUY blocked: insufficient MON (need ~${needMon.toFixed(4)})`; return false; }
