@@ -59,7 +59,7 @@ createServer((req, res) => {
   .buy{color:#72d98b}.sell{color:#ff8b8b}.muted{color:#aaa;font-size:13px;margin-top:18px;word-break:break-all}</style></head><body><div class="card">
   <h2>MOE Grid Bot</h2><table>
   <tr><td>Status</td><td class="status">${LIVE ? "LIVE" : "DRY RUN"}</td></tr>
-  <tr><td>Wallet</td><td>${walletAddress ?? "not configured"}</td></tr>\n  <tr><td>MON Balance</td><td>${monBalance === null ? "waiting..." : monBalance.toFixed(4)} MON</td></tr>\n  <tr><td>MOE Balance</td><td>${moeBalance === null ? "waiting..." : moeBalance.toFixed(4)} MOE</td></tr>\n  <tr><td>Current Price</td><td>${fmt(lastPrice)} MON/MOE</td></tr>
+  <tr><td>Wallet</td><td>${walletAddress ?? "not configured"}</td></tr>\n  <tr><td>MON Balance</td><td>${monBalance === null ? "waiting..." : Number(monBalance).toFixed(4)} MON</td></tr>\n  <tr><td>MOE Balance</td><td>${moeBalance === null ? "waiting..." : Number(moeBalance).toFixed(4)} MOE</td></tr>\n  <tr><td>Current Price</td><td>${fmt(lastPrice)} MON/MOE</td></tr>
   <tr><td>Anchor</td><td>${fmt(anchor)} MON/MOE</td></tr>
   <tr><td class="buy">BUY ≤</td><td class="buy">${fmt(lower)} MON/MOE</td></tr>
   <tr><td class="sell">SELL ≥</td><td class="sell">${fmt(upper)} MON/MOE</td></tr>
