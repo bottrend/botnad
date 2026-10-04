@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { parseUnits, createWalletClient, decodeEventLog } from "viem";
 import { createServer } from "node:http";
+import { readFile, writeFile, rename } from "node:fs/promises";
 import { createPublicClient, http, formatEther as viemFormatEther, formatUnits } from "viem";
 import { monad } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
@@ -60,6 +61,26 @@ let started: string | null = null;
 type LastTrade = { side: "BUY"|"SELL"; triggerPrice: number; fillPrice: number; txHash?: string; time: string };
 let lastTradeInfo: LastTrade | null = null;
 const PORT = Number(process.env.PORT ?? "8080");
+const STATE_FILE = process.env.STATE_FILE ?? "/data/botnad-state.json";
+type PersistedState = { anchor:number|null; buyCount:number; sellCount:number; totalTrades:number; lastTrade:string; lastTradeInfo:LastTrade|null; started:string|null; pendingTxHash?:string|null };
+let pendingTxHash: `0x${string}` | null = null;
+async function saveState() {
+  const tmp = STATE_FILE + ".tmp";
+  const state: PersistedState = { anchor,buyCount,sellCount,totalTrades,lastTrade,lastTradeInfo,started,pendingTxHash };
+  await writeFile(tmp, JSON.stringify(state), "utf8");
+  await rename(tmp, STATE_FILE);
+}
+async function loadState() {
+  try {
+    const s = JSON.parse(await readFile(STATE_FILE,"utf8")) as PersistedState;
+    anchor=s.anchor; buyCount=s.buyCount??0; sellCount=s.sellCount??0; totalTrades=s.totalTrades??0;
+    lastTrade=s.lastTrade??"None"; lastTradeInfo=s.lastTradeInfo??null; started=s.started??null;
+    pendingTxHash=(s.pendingTxHash as `0x${string}`|null|undefined)??null;
+    console.log("Persistent state restored", {anchor,totalTrades,lastTrade,pendingTxHash});
+  } catch (e:any) {
+    if (e?.code !== "ENOENT") throw e;
+  }
+}
 
 createServer((req, res) => {
   const upper = anchor === null ? null : anchor * (1 + GRID_STEP);
@@ -150,6 +171,8 @@ async function executeLive(side: "BUY" | "SELL", triggerPrice: number): Promise<
       const minOut = quotedOut * BigInt(Math.floor(10000-SLIPPAGE_PERCENT*100)) / 10000n;
       hash = await walletClient.writeContract({ address:V2_ROUTER, abi:v2QuoteAbi, functionName:"sellToNative", args:[{amountIn:tradeAmount,amountOutMin:minOut,token:TOKEN_ADDRESS,to:walletAddress,deadline}] });
     }
+    pendingTxHash = hash;
+    await saveState();
     const receipt = await publicClient.waitForTransactionReceipt({hash});
     if (receipt.status !== "success") throw new Error("Trade reverted");
     let amountIn=0n, amountOut=0n;
@@ -167,6 +190,8 @@ async function executeLive(side: "BUY" | "SELL", triggerPrice: number): Promise<
     anchor=fillPrice; lastTrade=`${side} ${TRADE_MOE} MOE @ ${fillPrice.toFixed(9)}`;
     lastTradeInfo={side,triggerPrice,fillPrice,txHash:hash,time:new Date().toISOString()};
     await refreshBalances();
+    pendingTxHash = null;
+    await saveState();
     return true;
   } finally { pending=false; }
 }
@@ -205,22 +230,30 @@ async function executeDry(side: "BUY" | "SELL", triggerPrice: number): Promise<b
     lastTradeInfo = { side, triggerPrice, fillPrice, time: new Date().toISOString() };
     anchor = fillPrice;
     console.log(`DRY RUN ${lastTrade}`);
+    await saveState();
     return true;
   } finally { pending = false; }
 }
 
 async function main() {
+  await loadState();
   tokenDecimals = Number(await publicClient.readContract({ address: TOKEN_ADDRESS, abi: erc20Abi, functionName: "decimals" }));
   tradeAmount = parseUnits(String(TRADE_MOE), tokenDecimals);
   const actualChainId = Number.parseInt(String(await rpc("eth_chainId")), 16);
   if (actualChainId !== CHAIN_ID || actualChainId !== 143) throw new Error(`Wrong chain: expected 143, got ${actualChainId}`);
+  if (pendingTxHash) {
+    const r = await publicClient.getTransactionReceipt({hash:pendingTxHash}).catch(()=>null);
+    if (!r) throw new Error(`Unresolved pending transaction ${pendingTxHash}; refusing to start trading`);
+    if (r.status !== "success") { pendingTxHash=null; await saveState(); }
+    else throw new Error(`Recovered successful pending transaction ${pendingTxHash}; manual reconciliation required before LIVE`);
+  }
   console.log("MOE grid bot started", { token: TOKEN_ADDRESS, grid: GRID_STEP, tradeMoe: TRADE_MOE, pollMs: POLL_INTERVAL_MS, live: LIVE, wallet: walletAddress });
   for (;;) {
     try {
       await refreshBalances();
       const px = await priceMonPerMoe();
       lastPrice = px; lastError = null;
-      if (anchor === null) { anchor = px; initialMon = monBalance; initialMoe = moeBalance; simMonBalance = monBalance; simMoeBalance = moeBalance; started = new Date().toISOString(); console.log(`Initial anchor=${anchor}`); }
+      if (anchor === null) { anchor = px; initialMon = monBalance; initialMoe = moeBalance; simMonBalance = monBalance; simMoeBalance = moeBalance; started = new Date().toISOString(); await saveState(); console.log(`Initial anchor=${anchor}`); } else if (initialMon === null) { initialMon=monBalance; initialMoe=moeBalance; simMonBalance=monBalance; simMoeBalance=moeBalance; }
       else {
         if (!pending && anchor !== null && px >= anchor * (1 + GRID_STEP)) {
           const level = anchor * (1 + GRID_STEP);
