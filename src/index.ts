@@ -4,7 +4,7 @@ import { initSDK, parseEther, formatEther } from "@nadfun/sdk";
 const RPC_URL = process.env.RPC_URL ?? "https://rpc.monad.xyz";
 const CHAIN_ID = Number(process.env.CHAIN_ID ?? "143");
 const TOKEN_ADDRESS = process.env.TOKEN_ADDRESS as `0x${string}`;
-const PRIVATE_KEY = process.env.PRIVATE_KEY as `0x${string}`;
+const PRIVATE_KEY = process.env.PRIVATE_KEY as `0x${string}` | undefined;
 const GRID_STEP = Number(process.env.GRID_STEP ?? "0.07");
 const TRADE_MOE = Number(process.env.TRADE_MOE ?? "190");
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? "1000");
@@ -12,9 +12,13 @@ const SLIPPAGE_PERCENT = Number(process.env.SLIPPAGE_PERCENT ?? "1");
 const LIVE = (process.env.LIVE_TRADING_ENABLED ?? "false").toLowerCase() === "true";
 
 if (!TOKEN_ADDRESS) throw new Error("TOKEN_ADDRESS is required");
-if (!PRIVATE_KEY) throw new Error("PRIVATE_KEY is required");
+if (LIVE && !PRIVATE_KEY) throw new Error("PRIVATE_KEY is required when LIVE_TRADING_ENABLED=true");
 
-const sdk = initSDK({ rpcUrl: RPC_URL, privateKey: PRIVATE_KEY, network: "mainnet" });
+const sdk = initSDK({
+  rpcUrl: RPC_URL,
+  ...(PRIVATE_KEY ? { privateKey: PRIVATE_KEY } : {}),
+  network: "mainnet"
+});
 const tradeAmount = parseEther(String(TRADE_MOE));
 let anchor: number | null = null;
 let pending = false;
@@ -47,6 +51,7 @@ async function execute(side: "BUY" | "SELL", triggerPrice: number) {
       anchor = triggerPrice;
       return;
     }
+    if (!PRIVATE_KEY) throw new Error("PRIVATE_KEY missing");
 
     if (side === "SELL") {
       const balance = await sdk.getBalance(TOKEN_ADDRESS);
@@ -57,8 +62,7 @@ async function execute(side: "BUY" | "SELL", triggerPrice: number) {
       await sdk.simpleBuy({ token: TOKEN_ADDRESS, amountIn: required.amount, slippagePercent: SLIPPAGE_PERCENT });
     }
 
-    const fillDerivedPrice = await priceMonPerMoe();
-    anchor = fillDerivedPrice;
+    anchor = await priceMonPerMoe();
     console.log(`FILLED ${side}; new anchor=${anchor}`);
   } finally {
     pending = false;
@@ -66,13 +70,15 @@ async function execute(side: "BUY" | "SELL", triggerPrice: number) {
 }
 
 async function main() {
-  const hexChainId = String(await rpc("eth_chainId"));
-  const actualChainId = Number.parseInt(hexChainId, 16);
+  const actualChainId = Number.parseInt(String(await rpc("eth_chainId")), 16);
   if (actualChainId !== CHAIN_ID || actualChainId !== 143) {
     throw new Error(`Wrong chain: expected 143, got ${actualChainId}`);
   }
 
-  console.log("MOE grid bot started", { token: TOKEN_ADDRESS, grid: GRID_STEP, tradeMoe: TRADE_MOE, pollMs: POLL_INTERVAL_MS, live: LIVE });
+  console.log("MOE grid bot started", {
+    token: TOKEN_ADDRESS, grid: GRID_STEP, tradeMoe: TRADE_MOE,
+    pollMs: POLL_INTERVAL_MS, live: LIVE, signerConfigured: Boolean(PRIVATE_KEY)
+  });
 
   for (;;) {
     try {
@@ -84,7 +90,6 @@ async function main() {
         const upper = anchor * (1 + GRID_STEP);
         const lower = anchor * (1 - GRID_STEP);
         console.log(`price=${px.toFixed(9)} anchor=${anchor.toFixed(9)} buy<=${lower.toFixed(9)} sell>=${upper.toFixed(9)}`);
-
         if (!pending && px >= upper) await execute("SELL", px);
         else if (!pending && px <= lower) await execute("BUY", px);
       }
