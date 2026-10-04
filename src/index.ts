@@ -14,6 +14,7 @@ const GRID_STEP = Number(process.env.GRID_STEP ?? "0.07");
 const TRADE_MOE = Number(process.env.TRADE_MOE ?? "190");
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? "1000");
 const SLIPPAGE_PERCENT = Number(process.env.SLIPPAGE_PERCENT ?? "1");
+const MIN_ROUNDTRIP_MARGIN = Number(process.env.MIN_ROUNDTRIP_MARGIN ?? "0.0025");
 const LIVE = (process.env.LIVE_TRADING_ENABLED ?? "false").toLowerCase() === "true";
 
 if (!TOKEN_ADDRESS) throw new Error("TOKEN_ADDRESS is required");
@@ -41,6 +42,13 @@ let buyCount = 0;
 let sellCount = 0;
 let lastTrade = "None";
 let realizedPnlMon = 0;
+let initialMon: number | null = null;
+let initialMoe: number | null = null;
+let totalTrades = 0;
+let guard: string | null = null;
+let started: string | null = null;
+type LastTrade = { side: "BUY"|"SELL"; triggerPrice: number; fillPrice: number; txHash?: string; time: string };
+let lastTradeInfo: LastTrade | null = null;
 const PORT = Number(process.env.PORT ?? "8080");
 
 createServer((req, res) => {
@@ -48,7 +56,7 @@ createServer((req, res) => {
   const lower = anchor === null ? null : anchor * (1 - GRID_STEP);
   if (req.url === "/health") {
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, live: LIVE, walletAddress, monBalance, moeBalance, price: lastPrice, anchor, lower, upper, pending, buyCount, sellCount, realizedPnlMon, lastError }));
+    const totalMon = lastPrice !== null && monBalance !== null && moeBalance !== null ? monBalance + moeBalance * lastPrice : null;\n    const initialTotalMon = lastPrice !== null && initialMon !== null && initialMoe !== null ? initialMon + initialMoe * lastPrice : null;\n    const pnlMon = totalMon !== null && initialTotalMon !== null ? totalMon - initialTotalMon : null;\n    res.end(JSON.stringify({ ok: true, live: LIVE, walletAddress, monBalance, moeBalance, price: lastPrice, anchor, lower, upper, pending, buyCount, sellCount, totalTrades, totalMon, pnlMon, guard, started, lastTradeInfo, lastError }));
     return;
   }
   const fmt = (v: number | null) => v === null ? "waiting..." : v.toFixed(9);
@@ -65,12 +73,12 @@ createServer((req, res) => {
   <tr><td class="sell">SELL ≥</td><td class="sell">${fmt(upper)} MON/MOE</td></tr>
   <tr><td>Grid Step</td><td>${(GRID_STEP*100).toFixed(2)}%</td></tr>
   <tr><td>Order Size</td><td>${TRADE_MOE} MOE</td></tr>
-  <tr><td>BUY Count</td><td>${buyCount}</td></tr>
-  <tr><td>SELL Count</td><td>${sellCount}</td></tr>
-  <tr><td>Realized PnL</td><td>${realizedPnlMon.toFixed(6)} MON</td></tr>
+  <tr><td>Total Value</td><td>${lastPrice !== null && monBalance !== null && moeBalance !== null ? (monBalance + moeBalance * lastPrice).toFixed(4) : "waiting..."} MON</td></tr>\n  <tr><td>BUY Count</td><td>${buyCount}</td></tr>
+  <tr><td>SELL Count</td><td>${sellCount}</td></tr>\n  <tr><td>Total Orders</td><td>${totalTrades}</td></tr>
+  <tr><td>PnL vs Start</td><td>${lastPrice !== null && monBalance !== null && moeBalance !== null && initialMon !== null && initialMoe !== null ? ((monBalance + moeBalance*lastPrice) - (initialMon + initialMoe*lastPrice)).toFixed(6) : "waiting..."} MON</td></tr>
   <tr><td>Last Trade</td><td>${lastTrade}</td></tr>
   <tr><td>Pending</td><td>${pending ? "YES" : "NO"}</td></tr>
-  </table><div class="muted">Token: ${TOKEN_ADDRESS}<br>Last error: ${lastError ?? "none"}</div>
+  </table><div class="muted">Token: ${TOKEN_ADDRESS}<br>Started: ${started ?? "waiting..."}<br>Guard: ${guard ?? "none"}<br>Last error: ${lastError ?? "none"}</div>
   <script>setTimeout(()=>location.reload(),3000)</script></div></body></html>`);
 }).listen(PORT, "0.0.0.0", () => console.log(`Dashboard listening on :${PORT}`));
 
@@ -100,15 +108,27 @@ async function refreshBalances() {
   moeBalance = Number(viemFormatEther(token));
 }
 
-async function executeDry(side: "BUY" | "SELL", triggerPrice: number) {
-  if (pending) return;
-  pending = true;
+async function executeDry(side: "BUY" | "SELL", triggerPrice: number): Promise<boolean> {
+  if (pending) return false;
+  const prev = lastTradeInfo;
+  if (prev) {
+    if (side === "BUY" && prev.side === "BUY" && triggerPrice >= prev.fillPrice) { guard = "BUY blocked: not below previous BUY"; return false; }
+    if (side === "SELL" && prev.side === "SELL" && triggerPrice <= prev.fillPrice) { guard = "SELL blocked: not above previous SELL"; return false; }
+    if (side === "BUY" && prev.side === "SELL" && triggerPrice >= prev.fillPrice * (1 - MIN_ROUNDTRIP_MARGIN)) { guard = "BUY blocked: round-trip margin"; return false; }
+    if (side === "SELL" && prev.side === "BUY" && triggerPrice <= prev.fillPrice * (1 + MIN_ROUNDTRIP_MARGIN)) { guard = "SELL blocked: round-trip margin"; return false; }
+  }
+  if (side === "SELL" && (moeBalance ?? 0) < TRADE_MOE) { guard = "SELL blocked: insufficient MOE"; return false; }
+  pending = true; guard = null;
   try {
     if (LIVE) throw new Error("LIVE execution remains locked until NadFun V2 transaction routing is enabled");
     if (side === "BUY") buyCount++; else sellCount++;
-    lastTrade = `${side} ${TRADE_MOE} MOE @ ~${triggerPrice.toFixed(9)}`;
-    anchor = triggerPrice;
+    totalTrades++;
+    const fillPrice = triggerPrice;
+    lastTrade = `${side} ${TRADE_MOE} MOE @ ~${fillPrice.toFixed(9)}`;
+    lastTradeInfo = { side, triggerPrice, fillPrice, time: new Date().toISOString() };
+    anchor = fillPrice;
     console.log(`DRY RUN ${lastTrade}`);
+    return true;
   } finally { pending = false; }
 }
 
@@ -121,7 +141,7 @@ async function main() {
       await refreshBalances();
       const px = await priceMonPerMoe();
       lastPrice = px; lastError = null;
-      if (anchor === null) { anchor = px; console.log(`Initial anchor=${anchor}`); }
+      if (anchor === null) { anchor = px; initialMon = monBalance; initialMoe = moeBalance; started = new Date().toISOString(); console.log(`Initial anchor=${anchor}`); }
       else {
         const upper = anchor * (1 + GRID_STEP), lower = anchor * (1 - GRID_STEP);
         if (!pending && px >= upper) await executeDry("SELL", px);
