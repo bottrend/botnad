@@ -1,0 +1,1 @@
+{"name":"botnad","version":"1.0.0","private":true,"type":"module","scripts":{"start":"tsx src/index.ts","build":"tsc --noEmit"},"dependencies":{"@nadfun/sdk":"^0.4.3","dotenv":"^16.4.5","tsx":"^4.19.2","typescript":"^5.7.2"}}
