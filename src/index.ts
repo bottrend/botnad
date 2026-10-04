@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { initSDK, parseEther, formatEther } from "@nadfun/sdk";
+import { createServer } from "node:http";
 
 const RPC_URL = process.env.RPC_URL ?? "https://rpc.monad.xyz";
 const CHAIN_ID = Number(process.env.CHAIN_ID ?? "143");
@@ -23,6 +24,19 @@ const sdk = initSDK({
 const tradeAmount = parseEther(String(TRADE_MOE));
 let anchor: number | null = null;
 let pending = false;
+let lastPrice: number | null = null;
+let lastError: string | null = null;
+const PORT = Number(process.env.PORT ?? "8080");
+
+createServer((req, res) => {
+  if (req.url === "/health") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true, live: LIVE, price: lastPrice, anchor, pending }));
+    return;
+  }
+  res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+  res.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>MOE Grid Bot</title><style>body{font-family:system-ui;background:#111;color:#eee;padding:24px}.card{max-width:680px;margin:auto;background:#1d1d1d;padding:24px;border-radius:16px}b{color:#8ee3a1}code{word-break:break-all}</style></head><body><div class="card"><h2>MOE Grid Bot</h2><p>Status: <b>${LIVE ? "LIVE" : "DRY RUN"}</b></p><p>Price: ${lastPrice ?? "waiting..."} MON/MOE</p><p>Anchor: ${anchor ?? "waiting..."}</p><p>Grid: ${GRID_STEP * 100}%</p><p>Order: ${TRADE_MOE} MOE</p><p>Pending: ${pending}</p><p>Token: <code>${TOKEN_ADDRESS}</code></p><p>Last error: ${lastError ?? "none"}</p><script>setTimeout(()=>location.reload(),3000)</script></div></body></html>`);
+}).listen(PORT, "0.0.0.0", () => console.log(`Dashboard listening on :${PORT}`));
 
 async function rpc(method: string, params: unknown[] = []) {
   const res = await fetch(RPC_URL, {
@@ -84,6 +98,8 @@ async function main() {
   for (;;) {
     try {
       const px = await priceMonPerMoe();
+      lastPrice = px;
+      lastError = null;
       if (anchor === null) {
         anchor = px;
         console.log(`Initial anchor=${anchor}`);
@@ -95,6 +111,7 @@ async function main() {
         else if (!pending && px <= lower) await execute("BUY", px);
       }
     } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
       console.error("loop error", err);
     }
     await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
