@@ -74,3 +74,64 @@ createServer((req, res) => {
   <script>setTimeout(()=>location.reload(),3000)</script></div></body></html>`);
 }).listen(PORT, "0.0.0.0", () => console.log(`Dashboard listening on :${PORT}`));
 
+
+async function rpc(method: string, params: unknown[] = []) {
+  const res = await fetch(RPC_URL, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
+  if (!res.ok) throw new Error(`RPC HTTP ${res.status}`);
+  const data = await res.json() as { result?: unknown; error?: unknown };
+  if (data.error) throw new Error(`RPC error: ${JSON.stringify(data.error)}`);
+  return data.result;
+}
+
+async function priceMonPerMoe(): Promise<number> {
+  const amountOut = await publicClient.readContract({ address: V2_ROUTER, abi: v2QuoteAbi, functionName: "getAmountOut", args: [TOKEN_ADDRESS, tradeAmount, false] });
+  const monOut = Number(viemFormatEther(amountOut));
+  if (!(monOut > 0)) throw new Error("Invalid V2 sell quote");
+  return monOut / TRADE_MOE;
+}
+
+async function refreshBalances() {
+  if (!walletAddress) return;
+  const [native, token] = await Promise.all([
+    publicClient.getBalance({ address: walletAddress }),
+    publicClient.readContract({ address: TOKEN_ADDRESS, abi: erc20Abi, functionName: "balanceOf", args: [walletAddress] })
+  ]);
+  monBalance = Number(viemFormatEther(native));
+  moeBalance = Number(viemFormatEther(token));
+}
+
+async function executeDry(side: "BUY" | "SELL", triggerPrice: number) {
+  if (pending) return;
+  pending = true;
+  try {
+    if (LIVE) throw new Error("LIVE execution remains locked until NadFun V2 transaction routing is enabled");
+    if (side === "BUY") buyCount++; else sellCount++;
+    lastTrade = `${side} ${TRADE_MOE} MOE @ ~${triggerPrice.toFixed(9)}`;
+    anchor = triggerPrice;
+    console.log(`DRY RUN ${lastTrade}`);
+  } finally { pending = false; }
+}
+
+async function main() {
+  const actualChainId = Number.parseInt(String(await rpc("eth_chainId")), 16);
+  if (actualChainId !== CHAIN_ID || actualChainId !== 143) throw new Error(`Wrong chain: expected 143, got ${actualChainId}`);
+  console.log("MOE grid bot started", { token: TOKEN_ADDRESS, grid: GRID_STEP, tradeMoe: TRADE_MOE, pollMs: POLL_INTERVAL_MS, live: LIVE, wallet: walletAddress });
+  for (;;) {
+    try {
+      await refreshBalances();
+      const px = await priceMonPerMoe();
+      lastPrice = px; lastError = null;
+      if (anchor === null) { anchor = px; console.log(`Initial anchor=${anchor}`); }
+      else {
+        const upper = anchor * (1 + GRID_STEP), lower = anchor * (1 - GRID_STEP);
+        if (!pending && px >= upper) await executeDry("SELL", px);
+        else if (!pending && px <= lower) await executeDry("BUY", px);
+      }
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      console.error("loop error", lastError);
+    }
+    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+  }
+}
+main().catch(err => { console.error(err); process.exit(1); });
